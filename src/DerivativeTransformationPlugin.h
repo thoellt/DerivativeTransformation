@@ -2,6 +2,8 @@
 
 #include <TransformationPlugin.h>
 
+#include "DerivativeKernels.h"
+
 #include <QMap>
 #include <QString>
 
@@ -22,14 +24,8 @@ class DerivativeTransformationPlugin : public TransformationPlugin
     Q_OBJECT
 
 public:
-    /** Available derivative kernels */
-    enum class Kernel {
-        Forward,        /** Forward differences, first order accurate */
-        Central,        /** Central differences, second order accurate */
-        Central5,       /** Five-point central differences, fourth order accurate */
-        SavitzkyGolay,  /** Savitzky-Golay least-squares derivative (window size, polynomial order) */
-        Gaussian        /** Derivative-of-Gaussian kernel (sigma) */
-    };
+    /** Available derivative kernels (math lives in DerivativeKernels.{h,cpp}) */
+    using Kernel = derivative::Kernel;
 
     static const QMap<Kernel, QString> kernels;
 

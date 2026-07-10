@@ -7,14 +7,16 @@ PROJECT("DerivativeTransformationPlugin" LANGUAGES CXX)
 set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
-find_package(Qt6 COMPONENTS Widgets Network REQUIRED)  # Network is needed because ManiVault core
-                                                       # headers (via Plugin.h) use QNetworkAccessManager
+find_package(Qt6 COMPONENTS Widgets Network Concurrent REQUIRED)  # Network is needed because ManiVault core
+                                                                  # headers (via Plugin.h) use QNetworkAccessManager
 find_package(ManiVault COMPONENTS Core PointData CONFIG QUIET)
 mv_project_defaults()
 
 set(PLUGIN_SOURCES
     src/DerivativeTransformationPlugin.h
     src/DerivativeTransformationPlugin.cpp
+    src/DerivativeKernels.h
+    src/DerivativeKernels.cpp
     PluginInfo.json
 )
 
@@ -33,6 +35,7 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Widgets)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Network)
+target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Concurrent)
 target_link_libraries(${PROJECT_NAME} PRIVATE ManiVault::Core)
 target_link_libraries(${PROJECT_NAME} PRIVATE ManiVault::PointData)
 

@@ -5,15 +5,19 @@
 #include <actions/DecimalAction.h>
 #include <actions/IntegralAction.h>
 
-#include <QApplication>
 #include <QDebug>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QEventLoop>
+#include <QFutureWatcher>
 #include <QGridLayout>
+#include <QThread>
+#include <QTimer>
+#include <QtConcurrent/QtConcurrent>
 
 #include <algorithm>
-#include <cmath>
-#include <map>
+#include <atomic>
+#include <utility>
 #include <vector>
 
 Q_PLUGIN_METADATA(IID "studio.manivault.DerivativeTransformationPlugin")
@@ -31,192 +35,6 @@ const QMap<Kernel, QString> DerivativeTransformationPlugin::kernels = QMap<Kerne
 });
 
 namespace {
-
-/** Weights of one output sample: out[d] = sum_j weights[j] * spectrum[start + j] */
-struct WeightRow {
-    int                 start = 0;
-    std::vector<double> weights;
-};
-
-/**
- * Savitzky-Golay first-derivative weights: least-squares fit of a polynomial of
- * order @p polynomialOrder to @p windowSize samples, derivative evaluated at
- * window position @p evaluationIndex (asymmetric positions handle boundaries).
- * Solves the normal equations (A^T A) y = e1 with A_{ji} = (j - t)^i, then w = A y.
- */
-std::vector<double> savitzkyGolayWeights(int windowSize, int polynomialOrder, int evaluationIndex)
-{
-    const int n = polynomialOrder + 1;
-
-    std::vector<double> moments(2 * polynomialOrder + 1, 0.0);
-
-    for (int j = 0; j < windowSize; ++j) {
-        const double u = j - evaluationIndex;
-        double power = 1.0;
-        for (int k = 0; k < static_cast<int>(moments.size()); ++k) {
-            moments[k] += power;
-            power *= u;
-        }
-    }
-
-    // Augmented system [M | e1], M_{ab} = moments[a + b]
-    std::vector<std::vector<double>> system(n, std::vector<double>(n + 1, 0.0));
-
-    for (int a = 0; a < n; ++a) {
-        for (int b = 0; b < n; ++b)
-            system[a][b] = moments[a + b];
-        system[a][n] = (a == 1) ? 1.0 : 0.0;
-    }
-
-    // Gaussian elimination with partial pivoting
-    for (int col = 0; col < n; ++col) {
-        int pivot = col;
-        for (int row = col + 1; row < n; ++row)
-            if (std::abs(system[row][col]) > std::abs(system[pivot][col]))
-                pivot = row;
-        std::swap(system[col], system[pivot]);
-
-        for (int row = col + 1; row < n; ++row) {
-            const double factor = system[row][col] / system[col][col];
-            for (int k = col; k <= n; ++k)
-                system[row][k] -= factor * system[col][k];
-        }
-    }
-
-    std::vector<double> y(n, 0.0);
-    for (int row = n - 1; row >= 0; --row) {
-        double sum = system[row][n];
-        for (int k = row + 1; k < n; ++k)
-            sum -= system[row][k] * y[k];
-        y[row] = sum / system[row][row];
-    }
-
-    std::vector<double> weights(windowSize, 0.0);
-    for (int j = 0; j < windowSize; ++j) {
-        const double u = j - evaluationIndex;
-        double power = 1.0;
-        for (int i = 0; i < n; ++i) {
-            weights[j] += y[i] * power;
-            power *= u;
-        }
-    }
-
-    return weights;
-}
-
-/**
- * Per-output-sample weight rows for the whole spectrum (unit sample spacing).
- * Interior samples get the nominal kernel; boundary samples fall back to
- * one-sided/asymmetric variants that stay exact for linear signals.
- */
-std::vector<WeightRow> buildWeightTable(Kernel kernel, int numSamples, int sgWindowSize, int sgPolynomialOrder, double sigma)
-{
-    const auto forwardAt = [numSamples](int d) -> WeightRow {
-        return { std::min(d, numSamples - 2), { -1.0, 1.0 } };
-    };
-
-    const auto centralAt = [&](int d) -> WeightRow {
-        if (d == 0 || d == numSamples - 1)
-            return forwardAt(d);
-        return { d - 1, { -0.5, 0.0, 0.5 } };
-    };
-
-    std::vector<WeightRow> rows(numSamples);
-
-    switch (kernel)
-    {
-        case Kernel::Forward:
-            for (int d = 0; d < numSamples; ++d)
-                rows[d] = forwardAt(d);
-            break;
-
-        case Kernel::Central:
-            for (int d = 0; d < numSamples; ++d)
-                rows[d] = centralAt(d);
-            break;
-
-        case Kernel::Central5:
-            for (int d = 0; d < numSamples; ++d) {
-                if (d >= 2 && d <= numSamples - 3)
-                    rows[d] = { d - 2, { 1.0 / 12.0, -8.0 / 12.0, 0.0, 8.0 / 12.0, -1.0 / 12.0 } };
-                else
-                    rows[d] = centralAt(d);
-            }
-            break;
-
-        case Kernel::SavitzkyGolay:
-        {
-            int windowSize = std::min(sgWindowSize, numSamples);
-            if (windowSize % 2 == 0)
-                windowSize -= 1;
-
-            if (windowSize < 3) {
-                for (int d = 0; d < numSamples; ++d)
-                    rows[d] = centralAt(d);
-                break;
-            }
-
-            const int polynomialOrder = std::clamp(sgPolynomialOrder, 1, windowSize - 1);
-            const int halfWindow = (windowSize - 1) / 2;
-
-            std::map<int, std::vector<double>> weightsByPosition;
-
-            for (int d = 0; d < numSamples; ++d) {
-                const int start = std::clamp(d - halfWindow, 0, numSamples - windowSize);
-                const int evaluationIndex = d - start;
-
-                auto cached = weightsByPosition.find(evaluationIndex);
-                if (cached == weightsByPosition.end())
-                    cached = weightsByPosition.emplace(evaluationIndex, savitzkyGolayWeights(windowSize, polynomialOrder, evaluationIndex)).first;
-
-                rows[d] = { start, cached->second };
-            }
-            break;
-        }
-
-        case Kernel::Gaussian:
-        {
-            const int radius = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
-
-            for (int d = 0; d < numSamples; ++d) {
-                const int start = std::max(0, d - radius);
-                const int end = std::min(numSamples - 1, d + radius);
-                const int count = end - start + 1;
-
-                std::vector<double> weights(count);
-                double mean = 0.0;
-
-                for (int j = 0; j < count; ++j) {
-                    const double k = start + j - d;
-                    weights[j] = k * std::exp(-k * k / (2.0 * sigma * sigma));
-                    mean += weights[j];
-                }
-                mean /= count;
-
-                // Enforce exactness for constant (sum w = 0) and linear (sum w*k = 1)
-                // signals; required where the truncated kernel loses its symmetry.
-                double scale = 0.0;
-                for (int j = 0; j < count; ++j) {
-                    weights[j] -= mean;
-                    scale += weights[j] * (start + j - d);
-                }
-
-                if (std::abs(scale) < 1e-12) {
-                    rows[d] = centralAt(d);
-                    continue;
-                }
-
-                for (auto& weight : weights)
-                    weight /= scale;
-
-                rows[d] = { start, std::move(weights) };
-            }
-            break;
-        }
-    }
-
-    return rows;
-}
 
 /**
  * Modal parameter dialog for the Savitzky-Golay and Gaussian kernels.
@@ -316,44 +134,67 @@ void DerivativeTransformationPlugin::transform()
     task.setRunning();
     task.setProgressDescription(QString("1st derivative, %1").arg(kernelDescription));
 
-    const auto weightTable = buildWeightTable(_kernel, numDimensions, _sgWindowSize, _sgPolynomialOrder, _sigma);
+    const auto weightTable = derivative::buildWeightTable(_kernel, numDimensions, _sgWindowSize, _sgPolynomialOrder, _sigma);
+
+    // Gather the input into a flat point-major buffer on the GUI thread
+    // (dataset access is GUI-thread only). visitData is subset-aware; do NOT
+    // use constVisitFromBeginToEnd here — it walks the raw source buffer,
+    // which is larger than numPoints * numDimensions when the input is a
+    // subset (buffer overflow).
+    std::vector<float> input(static_cast<std::size_t>(numPoints) * numDimensions);
+
+    points->visitData([&](auto pointData) {
+        std::size_t i = 0;
+        for (const auto point : pointData)
+            for (int d = 0; d < numDimensions; ++d)
+                input[i++] = static_cast<float>(point[d]);
+    });
+
+    std::vector<float> derivativeValues(input.size());
+
+    // Parallelize over points: workers only touch the flat buffers, never the
+    // dataset or any UI. Chunks are sized for ~4 chunks per core so progress
+    // stays granular without scheduling overhead.
+    const auto threadCount = std::max(1, QThread::idealThreadCount());
+    const auto chunkSize = std::max<std::uint32_t>(1024, (numPoints + threadCount * 4 - 1) / (threadCount * 4));
+
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> chunks;
+    for (std::uint32_t begin = 0; begin < numPoints; begin += chunkSize)
+        chunks.emplace_back(begin, std::min<std::uint32_t>(numPoints, begin + chunkSize));
+
+    std::atomic<std::uint32_t> pointsProcessed{ 0 };
+
+    auto future = QtConcurrent::map(chunks, [&](const std::pair<std::uint32_t, std::uint32_t>& chunk) {
+        derivative::convolveRange(input.data(), derivativeValues.data(), chunk.first, chunk.second, numDimensions, weightTable);
+        pointsProcessed.fetch_add(chunk.second - chunk.first, std::memory_order_relaxed);
+    });
+
+    // Wait on the GUI thread, reporting progress from the atomic counter
+    {
+        QEventLoop waitLoop;
+
+        QFutureWatcher<void> watcher;
+        QObject::connect(&watcher, &QFutureWatcher<void>::finished, &waitLoop, &QEventLoop::quit);
+        watcher.setFuture(future);
+
+        QTimer progressTimer;
+        progressTimer.setInterval(50);
+        QObject::connect(&progressTimer, &QTimer::timeout, &progressTimer, [&]() {
+            task.setProgress(static_cast<float>(pointsProcessed.load(std::memory_order_relaxed)) / numPoints);
+        });
+        progressTimer.start();
+
+        if (!future.isFinished())
+            waitLoop.exec();
+    }
+
+    input.clear();
+    input.shrink_to_fit();
 
     auto derived = mv::data().createDerivedDataset<Points>(
         points->getGuiName() + QString(" (1st derivative, %1)").arg(kernelDescription), points);
 
-    std::vector<float> derivative(static_cast<std::size_t>(numPoints) * numDimensions);
-
-    // visitData is subset-aware; do NOT use constVisitFromBeginToEnd here —
-    // it walks the raw source buffer, which is larger than
-    // numPoints * numDimensions when the input is a subset (buffer overflow).
-    // (Non-const overload used read-only: the const one does not compile in core 1.5.)
-    points->visitData([&](auto pointData) {
-        std::vector<double> spectrum(numDimensions);
-        std::size_t out = 0;
-        std::uint32_t pointsProcessed = 0;
-
-        for (const auto point : pointData) {
-            for (int d = 0; d < numDimensions; ++d)
-                spectrum[d] = static_cast<double>(point[d]);
-
-            for (int d = 0; d < numDimensions; ++d) {
-                const auto& row = weightTable[d];
-
-                double sum = 0.0;
-                for (std::size_t j = 0; j < row.weights.size(); ++j)
-                    sum += row.weights[j] * spectrum[row.start + j];
-
-                derivative[out++] = static_cast<float>(sum);
-            }
-
-            if (++pointsProcessed % 1000 == 0) {
-                task.setProgress(static_cast<float>(pointsProcessed) / numPoints);
-                QApplication::processEvents();
-            }
-        }
-    });
-
-    derived->setData(std::move(derivative), numDimensions);
+    derived->setData(std::move(derivativeValues), numDimensions);
 
     auto dimensionNames = points->getDimensionNames();
 
