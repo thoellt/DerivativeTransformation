@@ -10,9 +10,9 @@
 #include <QDialogButtonBox>
 #include <QEventLoop>
 #include <QFutureWatcher>
-#include <QGridLayout>
 #include <QThread>
 #include <QTimer>
+#include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrent>
 
 #include <algorithm>
@@ -43,63 +43,18 @@ const QMap<Output, QString> DerivativeTransformationPlugin::outputs = QMap<Outpu
 
 namespace {
 
-/**
- * Modal parameter dialog for the Savitzky-Golay and Gaussian kernels.
- * Returns false if the user cancelled.
- */
-bool promptKernelParameters(Kernel kernel, int& sgWindowSize, int& sgPolynomialOrder, float& sigma)
+/** Whether \p kernel has parameters to configure at all */
+bool isParameterizedKernel(Kernel kernel)
 {
-    QDialog dialog;
-    dialog.setWindowTitle(QString("Derivative Transformation: %1").arg(DerivativeTransformationPlugin::getKernelName(kernel)));
-
-    auto layout = new QGridLayout(&dialog);
-
-    mv::gui::IntegralAction* windowSizeAction = nullptr;
-    mv::gui::IntegralAction* polynomialOrderAction = nullptr;
-    mv::gui::DecimalAction* sigmaAction = nullptr;
-
-    int row = 0;
-
-    const auto addAction = [&](mv::gui::WidgetAction* action) {
-        layout->addWidget(action->createLabelWidget(&dialog), row, 0);
-        layout->addWidget(action->createWidget(&dialog), row, 1);
-        ++row;
-    };
-
-    if (kernel == Kernel::SavitzkyGolay) {
-        windowSizeAction = new mv::gui::IntegralAction(&dialog, "Window size", 3, 101, sgWindowSize);
-        windowSizeAction->setToolTip("Sliding window size in samples (odd values; even input is rounded up)");
-        addAction(windowSizeAction);
-
-        polynomialOrderAction = new mv::gui::IntegralAction(&dialog, "Polynomial order", 1, 10, sgPolynomialOrder);
-        polynomialOrderAction->setToolTip("Order of the fitted polynomial (must be smaller than the window size)");
-        addAction(polynomialOrderAction);
-    }
-
-    if (kernel == Kernel::Gaussian) {
-        sigmaAction = new mv::gui::DecimalAction(&dialog, "Sigma", 0.1f, 25.0f, sigma, 2);
-        sigmaAction->setToolTip("Standard deviation of the Gaussian in samples");
-        addAction(sigmaAction);
-    }
-
-    auto buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons, row, 0, 1, 2);
-
-    if (dialog.exec() != QDialog::Accepted)
-        return false;
-
-    if (windowSizeAction) {
-        sgWindowSize = windowSizeAction->getValue() | 1; // round up to odd
-        sgPolynomialOrder = std::min(polynomialOrderAction->getValue(), sgWindowSize - 1);
-    }
-
-    if (sigmaAction)
-        sigma = sigmaAction->getValue();
-
-    return true;
+    return kernel == Kernel::SavitzkyGolay || kernel == Kernel::Gaussian;
 }
+
+/**
+ * Highest Savitzky-Golay polynomial order offered, regardless of the window size. Fitting a
+ * high order polynomial over a handful of samples is numerically poor long before the window
+ * runs out of room for it.
+ */
+constexpr int maxPolynomialOrder = 10;
 
 } // namespace
 
@@ -273,8 +228,39 @@ void DerivativeTransformationPlugin::transform()
 // Factory
 // -----------------------------------------------------------------------------
 
-DerivativeTransformationPluginFactory::DerivativeTransformationPluginFactory()
+DerivativeTransformationPluginFactory::DerivativeTransformationPluginFactory() :
+    _sgWindowSizeAction(this, "Window size", 3, 101, 7),
+    _sgPolynomialOrderAction(this, "Polynomial order", 1, 10, 2),
+    _sigmaAction(this, "Sigma", 0.1f, 25.0f, 1.0f, 2),
+    _sgGroupAction(this, "Savitzky-Golay"),
+    _gaussianGroupAction(this, "Gaussian derivative"),
+    _sgWindowSizeLast(_sgWindowSizeAction.getValue())
 {
+    _sgWindowSizeAction.setToolTip("Sliding window size in samples (odd; stepping moves it by two)");
+    _sgPolynomialOrderAction.setToolTip("Order of the fitted polynomial (kept below the window size)");
+    _sigmaAction.setToolTip("Standard deviation of the Gaussian in samples");
+
+    // The kernel is only defined for some combinations of the two, so rather than correct
+    // them behind the user's back when the transformation runs, the actions are held to
+    // those combinations as they are edited — whichever UI is doing the editing
+    connect(&_sgWindowSizeAction, &mv::gui::IntegralAction::valueChanged, this, [this]() -> void {
+        constrainSavitzkyGolayParameters();
+    });
+
+    constrainSavitzkyGolayParameters();
+
+    // The parameters live on the factory rather than on each trigger action, so that whichever
+    // way they are reached — the gear button of a trigger picker or the modal prompt of the
+    // right-click entries — both routes read and write the same values
+    _sgGroupAction.setToolTip("Savitzky-Golay derivative settings");
+    _sgGroupAction.setLabelSizingType(mv::gui::GroupAction::LabelSizingType::Auto);
+    _sgGroupAction.addAction(&_sgWindowSizeAction);
+    _sgGroupAction.addAction(&_sgPolynomialOrderAction);
+
+    _gaussianGroupAction.setToolTip("Derivative-of-Gaussian settings");
+    _gaussianGroupAction.setLabelSizingType(mv::gui::GroupAction::LabelSizingType::Auto);
+    _gaussianGroupAction.addAction(&_sigmaAction);
+
     getPluginMetadata().setDescription("First derivative of spectral response functions");
     getPluginMetadata().setSummary("Computes the first derivative of per-point spectra via selectable derivative kernels (finite differences, Savitzky-Golay, Gaussian).");
     getPluginMetadata().setCopyrightHolder({ "REPLACE ME" });
@@ -285,6 +271,100 @@ DerivativeTransformationPluginFactory::DerivativeTransformationPluginFactory()
 DerivativeTransformationPlugin* DerivativeTransformationPluginFactory::produce()
 {
     return new DerivativeTransformationPlugin(this);
+}
+
+mv::gui::WidgetAction* DerivativeTransformationPluginFactory::getConfigurationAction(const Kernel& kernel)
+{
+    switch (kernel)
+    {
+        case Kernel::SavitzkyGolay:
+            return &_sgGroupAction;
+
+        case Kernel::Gaussian:
+            return &_gaussianGroupAction;
+
+        case Kernel::Forward:
+        case Kernel::Central:
+        case Kernel::Central5:
+            break;
+    }
+
+    return nullptr;
+}
+
+void DerivativeTransformationPluginFactory::constrainSavitzkyGolayParameters()
+{
+    const auto windowSize = _sgWindowSizeAction.getValue();
+
+    // An even window has no centre sample to differentiate about. Which odd neighbour it
+    // becomes follows the direction it was moved in, so that stepping the spin box up from 7
+    // reaches 9 rather than being pulled back to 7 and looking broken.
+    if (windowSize % 2 == 0) {
+        _sgWindowSizeAction.setValue(windowSize > _sgWindowSizeLast ? windowSize + 1 : windowSize - 1);
+
+        // Setting it re-enters here with an odd value, which does the rest of the work
+        return;
+    }
+
+    _sgWindowSizeLast = windowSize;
+
+    // A polynomial of the window's own order fits it exactly and so has no smoothing left in
+    // it; the action's maximum keeps the UI from offering that in the first place
+    const auto highestOrder = std::min(maxPolynomialOrder, windowSize - 1);
+
+    _sgPolynomialOrderAction.setMaximum(highestOrder);
+
+    // Lowering the maximum leaves the value where it was, so it has to be brought down by hand
+    _sgPolynomialOrderAction.setValue(std::min(_sgPolynomialOrderAction.getValue(), highestOrder));
+}
+
+void DerivativeTransformationPluginFactory::getSavitzkyGolayParameters(int& windowSize, int& polynomialOrder) const
+{
+    windowSize      = _sgWindowSizeAction.getValue();
+    polynomialOrder = _sgPolynomialOrderAction.getValue();
+}
+
+float DerivativeTransformationPluginFactory::getGaussianSigma() const
+{
+    return _sigmaAction.getValue();
+}
+
+bool DerivativeTransformationPluginFactory::editKernelParameters(const Kernel& kernel)
+{
+    auto configurationAction = getConfigurationAction(kernel);
+
+    if (!configurationAction)
+        return true;
+
+    // The very actions the configuration action offers are edited here, so cancelling has to
+    // put back what they held before the dialog was opened
+    const auto windowSize       = _sgWindowSizeAction.getValue();
+    const auto polynomialOrder  = _sgPolynomialOrderAction.getValue();
+    const auto sigma            = _sigmaAction.getValue();
+
+    QDialog dialog;
+
+    dialog.setWindowTitle(QString("Derivative Transformation: %1").arg(DerivativeTransformationPlugin::getKernelName(kernel)));
+
+    auto layout = new QVBoxLayout(&dialog);
+
+    layout->addWidget(configurationAction->createWidget(&dialog));
+
+    auto buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    layout->addWidget(buttons);
+
+    if (dialog.exec() == QDialog::Accepted)
+        return true;
+
+    _sgWindowSizeAction.setValue(windowSize);
+    _sgPolynomialOrderAction.setValue(polynomialOrder);
+    _sigmaAction.setValue(sigma);
+
+    return false;
 }
 
 mv::DataTypes DerivativeTransformationPluginFactory::supportedDataTypes() const
@@ -300,22 +380,26 @@ mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::getPluginTr
         const auto addTriggerAction = [this, &pluginTriggerActions, datasets](const Output& output, const Kernel& kernel) {
             const auto kernelName = DerivativeTransformationPlugin::getKernelName(kernel);
             const auto outputName = DerivativeTransformationPlugin::getOutputName(output);
-            const auto isParameterized = kernel == Kernel::SavitzkyGolay || kernel == Kernel::Gaussian;
-            const auto menuName = isParameterized ? kernelName + "..." : kernelName;
+            const auto menuName = isParameterizedKernel(kernel) ? kernelName + "..." : kernelName;
 
             const auto tooltip = output == Output::InPlace
                 ? QString("Compute the first derivative (%1), overwriting the input dataset").arg(kernelName)
                 : QString("Compute the first derivative (%1) into a derived dataset").arg(kernelName);
 
-            auto pluginTriggerAction = new mv::gui::PluginTriggerAction(const_cast<DerivativeTransformationPluginFactory*>(this), this,
-                QString("Derivative Transformation/%1/%2").arg(outputName, menuName), tooltip, icon(),
-                [this, datasets, kernel, output, isParameterized](mv::gui::PluginTriggerAction& pluginTriggerAction) -> void {
-                    int sgWindowSize = 7;
-                    int sgPolynomialOrder = 2;
-                    float sigma = 1.0f;
+            auto factory = const_cast<DerivativeTransformationPluginFactory*>(this);
 
-                    if (isParameterized && !promptKernelParameters(kernel, sgWindowSize, sgPolynomialOrder, sigma))
+            auto pluginTriggerAction = new mv::gui::PluginTriggerAction(factory, this,
+                QString("Derivative Transformation/%1/%2").arg(outputName, menuName), tooltip, icon(),
+                [this, factory, datasets, kernel, output](mv::gui::PluginTriggerAction& pluginTriggerAction) -> void {
+                    // Nothing here shows the configuration action, so the parameters still
+                    // have to be asked for; it edits the very actions the gear button offers
+                    if (!factory->editKernelParameters(kernel))
                         return;
+
+                    int sgWindowSize        = 0;
+                    int sgPolynomialOrder   = 0;
+
+                    getSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
 
                     for (const auto& dataset : datasets) {
                         auto pluginInstance = dynamic_cast<DerivativeTransformationPlugin*>(plugins().requestPlugin(getKind()));
@@ -324,11 +408,13 @@ mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::getPluginTr
                             pluginInstance->setKernel(kernel);
                             pluginInstance->setOutput(output);
                             pluginInstance->setSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
-                            pluginInstance->setGaussianSigma(sigma);
+                            pluginInstance->setGaussianSigma(getGaussianSigma());
                             pluginInstance->transform();
                         }
                     }
                 });
+
+            pluginTriggerAction->setConfigurationAction(factory->getConfigurationAction(kernel));
 
             pluginTriggerActions << pluginTriggerAction;
         };

@@ -4,6 +4,10 @@
 
 #include "DerivativeKernels.h"
 
+#include <actions/DecimalAction.h>
+#include <actions/GroupAction.h>
+#include <actions/IntegralAction.h>
+
 #include <QMap>
 #include <QString>
 
@@ -85,6 +89,9 @@ class DerivativeTransformationPluginFactory : public TransformationPluginFactory
                       FILE  "PluginInfo.json")
 
 public:
+    /** Available derivative kernels, spelled as the plugin spells them */
+    using Kernel = DerivativeTransformationPlugin::Kernel;
+
     DerivativeTransformationPluginFactory();
 
     DerivativeTransformationPlugin* produce() override;
@@ -93,4 +100,63 @@ public:
 
     /** One right-click "Transform" entry per output mode and kernel */
     mv::gui::PluginTriggerActions getPluginTriggerActions(const mv::Datasets& datasets) const override;
+
+    /**
+     * Get the action that configures the parameters of \p kernel
+     *
+     * Handed to the trigger actions so that a caller offering a configuration UI, such as
+     * the gear button of a plugin trigger picker, can present them before triggering.
+     *
+     * @param kernel Derivative kernel to configure
+     * @return Pointer to the configuration action, nullptr when the kernel has no parameters
+     */
+    mv::gui::WidgetAction* getConfigurationAction(const Kernel& kernel);
+
+    /**
+     * Get the Savitzky-Golay parameters
+     *
+     * Always a usable combination: the actions themselves are kept to one, so there is
+     * nothing left to correct here.
+     *
+     * @param windowSize Sliding window size in samples, odd
+     * @param polynomialOrder Order of the fitted polynomial, smaller than the window size
+     */
+    void getSavitzkyGolayParameters(int& windowSize, int& polynomialOrder) const;
+
+    /**
+     * Get the derivative-of-Gaussian standard deviation in samples
+     * @return Standard deviation
+     */
+    float getGaussianSigma() const;
+
+private:
+
+    /**
+     * Ask for the parameters of \p kernel in a modal dialog
+     *
+     * For callers that trigger an action straight away and so never get to show the
+     * configuration action themselves, such as the dataset right-click menu. Edits the same
+     * actions the configuration action does, and puts them back when the dialog is cancelled.
+     *
+     * @param kernel Derivative kernel to configure
+     * @return Boolean determining whether the transformation should go ahead
+     */
+    bool editKernelParameters(const Kernel& kernel);
+
+    /**
+     * Keep the Savitzky-Golay actions to combinations the kernel is defined for
+     *
+     * Rounds the window size to odd in whichever direction it was moved, and caps the
+     * polynomial order below it. Called whenever the window size changes, and once at
+     * construction to bring the initial values under the same rule.
+     */
+    void constrainSavitzkyGolayParameters();
+
+
+    mv::gui::IntegralAction _sgWindowSizeAction;        /** Savitzky-Golay window size (samples, odd) */
+    mv::gui::IntegralAction _sgPolynomialOrderAction;   /** Savitzky-Golay polynomial order */
+    mv::gui::DecimalAction  _sigmaAction;               /** Derivative-of-Gaussian standard deviation (samples) */
+    mv::gui::GroupAction    _sgGroupAction;             /** Configuration UI for the Savitzky-Golay kernel */
+    mv::gui::GroupAction    _gaussianGroupAction;       /** Configuration UI for the Gaussian kernel */
+    int                     _sgWindowSizeLast;          /** Last window size seen, to tell which way it is being moved */
 };

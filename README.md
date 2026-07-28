@@ -26,8 +26,12 @@ The user selects one of five derivative kernels:
 | **Forward differences** | First-order accurate |
 | **Central differences** | Second-order accurate |
 | **5-point central differences** | Fourth-order accurate |
-| **Savitzky–Golay** | Least-squares polynomial derivative; window size and polynomial order set via a dialog |
-| **Derivative-of-Gaussian** | Gaussian-smoothed derivative; σ set via a dialog |
+| **Savitzky–Golay** | Least-squares polynomial derivative; window size and polynomial order are configurable |
+| **Derivative-of-Gaussian** | Gaussian-smoothed derivative; σ is configurable |
+
+The two parameterized kernels expose their settings through a configuration action on the trigger, so a host that offers one — the gear button next to a plugin trigger picker, for instance — can present them in place. The right-click entries have nowhere to show it and are marked with `...`; they ask for the same settings in a modal dialog when triggered. Both routes read and write the same values, and cancelling the dialog restores what was set before it opened.
+
+The settings only offer combinations the kernel is defined for: the window size stays odd (stepping it moves it by two, in the direction it was stepped), and the polynomial order's upper bound follows the window size — capped at 10, above which fitting is numerically poor regardless of how much room the window has.
 
 Boundary samples fall back to one-sided/asymmetric kernels that stay exact for linear signals, so the output keeps the input's dimensionality.
 
