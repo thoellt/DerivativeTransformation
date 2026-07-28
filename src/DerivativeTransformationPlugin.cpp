@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,7 @@ Q_PLUGIN_METADATA(IID "studio.manivault.DerivativeTransformationPlugin")
 using namespace mv;
 
 using Kernel = DerivativeTransformationPlugin::Kernel;
+using Output = DerivativeTransformationPlugin::Output;
 
 const QMap<Kernel, QString> DerivativeTransformationPlugin::kernels = QMap<Kernel, QString>({
     { Kernel::Forward, "Forward differences" },
@@ -32,6 +34,11 @@ const QMap<Kernel, QString> DerivativeTransformationPlugin::kernels = QMap<Kerne
     { Kernel::Central5, "Central differences (5-point)" },
     { Kernel::SavitzkyGolay, "Savitzky-Golay" },
     { Kernel::Gaussian, "Gaussian derivative" }
+});
+
+const QMap<Output, QString> DerivativeTransformationPlugin::outputs = QMap<Output, QString>({
+    { Output::InPlace, "In-place" },
+    { Output::Derived, "Derived data" }
 });
 
 namespace {
@@ -99,6 +106,7 @@ bool promptKernelParameters(Kernel kernel, int& sgWindowSize, int& sgPolynomialO
 DerivativeTransformationPlugin::DerivativeTransformationPlugin(const PluginFactory* factory) :
     TransformationPlugin(factory),
     _kernel(Kernel::Central),
+    _output(Output::Derived),
     _sgWindowSize(7),
     _sgPolynomialOrder(2),
     _sigma(1.0f)
@@ -132,7 +140,7 @@ void DerivativeTransformationPlugin::transform()
 
     task.setName("Derivative Transformation");
     task.setRunning();
-    task.setProgressDescription(QString("1st derivative, %1").arg(kernelDescription));
+    task.setProgressDescription(QString("1st derivative, %1 (%2)").arg(kernelDescription, getOutputName(_output).toLower()));
 
     const auto weightTable = derivative::buildWeightTable(_kernel, numDimensions, _sgWindowSize, _sgPolynomialOrder, _sigma);
 
@@ -191,25 +199,72 @@ void DerivativeTransformationPlugin::transform()
     input.clear();
     input.shrink_to_fit();
 
-    auto derived = mv::data().createDerivedDataset<Points>(
-        points->getGuiName() + QString(" (1st derivative, %1)").arg(kernelDescription), points);
+    // The samples the result holds are derivatives, so they are named for that. The names
+    // of the input only carry over when there is one per sample, which a dataset that was
+    // never given dimension names does not have.
+    const auto derivativeDimensionNames = [&points, numDimensions]() -> std::vector<QString> {
+        auto dimensionNames = points->getDimensionNames();
 
-    derived->setData(std::move(derivativeValues), numDimensions);
+        if (static_cast<int>(dimensionNames.size()) != numDimensions) {
+            dimensionNames.resize(numDimensions);
 
-    auto dimensionNames = points->getDimensionNames();
+            for (int d = 0; d < numDimensions; ++d)
+                dimensionNames[d] = QString::number(d);
+        }
 
-    if (static_cast<int>(dimensionNames.size()) == numDimensions) {
         for (auto& name : dimensionNames)
             name = QString("d/dλ %1").arg(name);
-    } else {
-        dimensionNames.resize(numDimensions);
-        for (int d = 0; d < numDimensions; ++d)
-            dimensionNames[d] = QString("d/dλ %1").arg(d);
+
+        return dimensionNames;
+    };
+
+    switch (_output)
+    {
+        case Output::InPlace:
+        {
+            points->setLocked(true);
+
+            // Written back in the same point-major order it was gathered in; visitData walks
+            // a subset in its own order, so gather and scatter line up only because both go
+            // through it. Note that a dataset whose elements are not floating point rounds
+            // the derivative to its own type here, which the derived output does not do.
+            points->visitData([&derivativeValues, numDimensions](auto pointData) {
+                std::size_t i = 0;
+
+                for (auto point : pointData) {
+                    for (int d = 0; d < numDimensions; ++d) {
+                        using ValueType = std::remove_reference_t<decltype(point[d])>;
+
+                        point[d] = static_cast<ValueType>(derivativeValues[i++]);
+                    }
+                }
+            });
+
+            points->setLocked(false);
+
+            // Dimension names sit on the raw data that a subset shares with its parent, so
+            // renaming them from a subset would relabel points that were left alone
+            if (points->isFull())
+                points->setDimensionNames(derivativeDimensionNames());
+
+            events().notifyDatasetDataChanged(points);
+
+            break;
+        }
+
+        case Output::Derived:
+        {
+            auto derived = mv::data().createDerivedDataset<Points>(
+                points->getGuiName() + QString(" (1st derivative, %1)").arg(kernelDescription), points);
+
+            derived->setData(std::move(derivativeValues), numDimensions);
+            derived->setDimensionNames(derivativeDimensionNames());
+
+            events().notifyDatasetDataChanged(derived);
+
+            break;
+        }
     }
-
-    derived->setDimensionNames(dimensionNames);
-
-    events().notifyDatasetDataChanged(derived);
 
     task.setFinished();
 }
@@ -242,14 +297,19 @@ mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::getPluginTr
     mv::gui::PluginTriggerActions pluginTriggerActions;
 
     if (datasets.count() >= 1 && PluginFactory::areAllDatasetsOfTheSameType(datasets, PointType)) {
-        const auto addTriggerAction = [this, &pluginTriggerActions, datasets](const Kernel& kernel) {
+        const auto addTriggerAction = [this, &pluginTriggerActions, datasets](const Output& output, const Kernel& kernel) {
             const auto kernelName = DerivativeTransformationPlugin::getKernelName(kernel);
+            const auto outputName = DerivativeTransformationPlugin::getOutputName(output);
             const auto isParameterized = kernel == Kernel::SavitzkyGolay || kernel == Kernel::Gaussian;
             const auto menuName = isParameterized ? kernelName + "..." : kernelName;
 
+            const auto tooltip = output == Output::InPlace
+                ? QString("Compute the first derivative (%1), overwriting the input dataset").arg(kernelName)
+                : QString("Compute the first derivative (%1) into a derived dataset").arg(kernelName);
+
             auto pluginTriggerAction = new mv::gui::PluginTriggerAction(const_cast<DerivativeTransformationPluginFactory*>(this), this,
-                QString("Derivative Transformation/%1").arg(menuName), QString("Compute the first derivative (%1)").arg(kernelName), icon(),
-                [this, datasets, kernel, isParameterized](mv::gui::PluginTriggerAction& pluginTriggerAction) -> void {
+                QString("Derivative Transformation/%1/%2").arg(outputName, menuName), tooltip, icon(),
+                [this, datasets, kernel, output, isParameterized](mv::gui::PluginTriggerAction& pluginTriggerAction) -> void {
                     int sgWindowSize = 7;
                     int sgPolynomialOrder = 2;
                     float sigma = 1.0f;
@@ -262,6 +322,7 @@ mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::getPluginTr
                         if (pluginInstance) {
                             pluginInstance->setInputDataset(dataset);
                             pluginInstance->setKernel(kernel);
+                            pluginInstance->setOutput(output);
                             pluginInstance->setSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
                             pluginInstance->setGaussianSigma(sigma);
                             pluginInstance->transform();
@@ -272,11 +333,13 @@ mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::getPluginTr
             pluginTriggerActions << pluginTriggerAction;
         };
 
-        addTriggerAction(Kernel::Forward);
-        addTriggerAction(Kernel::Central);
-        addTriggerAction(Kernel::Central5);
-        addTriggerAction(Kernel::SavitzkyGolay);
-        addTriggerAction(Kernel::Gaussian);
+        for (const auto output : { Output::InPlace, Output::Derived }) {
+            addTriggerAction(output, Kernel::Forward);
+            addTriggerAction(output, Kernel::Central);
+            addTriggerAction(output, Kernel::Central5);
+            addTriggerAction(output, Kernel::SavitzkyGolay);
+            addTriggerAction(output, Kernel::Gaussian);
+        }
     }
 
     return pluginTriggerActions;

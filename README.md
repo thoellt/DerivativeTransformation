@@ -4,11 +4,18 @@ A [ManiVault Studio](https://github.com/ManiVaultStudio) **Transformation** plug
 
 ## What it does
 
-Each point in the input dataset is treated as one function whose dimensions are ordered samples with unit spacing (e.g. a spectral response curve). The plugin convolves every function with a precomputed per-sample weight table to produce its first derivative, writing the result to a **new derived dataset**. Output dimensions match the input, and dimension names are prefixed with `d/dλ`.
+Each point in the input dataset is treated as one function whose dimensions are ordered samples with unit spacing (e.g. a spectral response curve). The plugin convolves every function with a precomputed per-sample weight table to produce its first derivative. Output dimensions match the input, and dimension names are prefixed with `d/dλ`.
 
 It is triggered from the dataset right-click menu:
 
-> **Transform → Derivative Transformation**
+> **Transform → Derivative Transformation → *output mode* → *kernel***
+
+### Output modes
+
+| Mode | Description |
+|---|---|
+| **In-place** | The derivative overwrites the values of the input dataset. Applied to a subset, only that subset's points are written and the dimension names are left alone, since they are shared with the parent. |
+| **Derived data** | The derivative is written to a **new derived dataset** named after the input and the kernel; the input is left untouched. |
 
 ### Kernels
 
