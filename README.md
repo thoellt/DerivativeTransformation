@@ -8,28 +8,35 @@ Each point in the input dataset is treated as one function whose dimensions are 
 
 It is triggered from the dataset right-click menu:
 
-> **Transform → Derivative Transformation → *output mode* → *kernel***
+> **Transform → Derivative Transformation**
 
-### Output modes
+A single entry; everything it does is a setting.
+
+### Settings
+
+**Kernel** picks the derivative kernel (see below); it defaults to Savitzky–Golay.
+
+**Output** decides where the result goes, and applies to every kernel:
 
 | Mode | Description |
 |---|---|
-| **In-place** | The derivative overwrites the values of the input dataset. Applied to a subset, only that subset's points are written and the dimension names are left alone, since they are shared with the parent. |
-| **Derived data** | The derivative is written to a **new derived dataset** named after the input and the kernel; the input is left untouched. |
+| **Add derived dataset** (default) | The derivative is written to a **new derived dataset** named after the input and the kernel; the input is left untouched. |
+| **Replace existing dataset** | The derivative overwrites the values of the input dataset. Applied to a subset, only that subset's points are written and the dimension names are left alone, since they are shared with the parent. |
 
 ### Kernels
-
-The user selects one of five derivative kernels:
 
 | Kernel | Description |
 |---|---|
 | **Forward differences** | First-order accurate |
 | **Central differences** | Second-order accurate |
 | **5-point central differences** | Fourth-order accurate |
-| **Savitzky–Golay** | Least-squares polynomial derivative; window size and polynomial order are configurable |
-| **Derivative-of-Gaussian** | Gaussian-smoothed derivative; σ is configurable |
+| **Savitzky–Golay** (default) | Least-squares polynomial derivative; adds **Window size** and **Polynomial order** |
+| **Derivative-of-Gaussian** | Gaussian-smoothed derivative; adds **Sigma** |
 
-The two parameterized kernels expose their settings through a configuration action on the trigger, so a host that offers one — the gear button next to a plugin trigger picker, for instance — can present them in place. The right-click entries have nowhere to show it and are marked with `...`; they ask for the same settings in a modal dialog when triggered. Both routes read and write the same values, and cancelling the dialog restores what was set before it opened.
+The parameters of all kernels sit in the same panel; the ones that do not belong to the
+selected kernel are greyed out rather than removed, so what a kernel offers stays visible.
+
+The settings are exposed through a configuration action on the trigger, so a host that offers one — the gear button next to a plugin trigger picker, for instance — can present them in place. The right-click entries have nowhere to show it and are marked with `...`; they ask for the same settings in a modal dialog when triggered. Both routes read and write the same values, and cancelling the dialog restores what was set before it opened.
 
 The settings only offer combinations the kernel is defined for: the window size stays odd (stepping it moves it by two, in the direction it was stepped), and the polynomial order's upper bound follows the window size — capped at 10, above which fitting is numerically poor regardless of how much room the window has.
 

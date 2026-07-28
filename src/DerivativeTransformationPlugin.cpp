@@ -37,17 +37,11 @@ const QMap<Kernel, QString> DerivativeTransformationPlugin::kernels = QMap<Kerne
 });
 
 const QMap<Output, QString> DerivativeTransformationPlugin::outputs = QMap<Output, QString>({
-    { Output::InPlace, "In-place" },
-    { Output::Derived, "Derived data" }
+    { Output::InPlace, "Replace existing dataset" },
+    { Output::Derived, "Add derived dataset" }
 });
 
 namespace {
-
-/** Whether \p kernel has parameters to configure at all */
-bool isParameterizedKernel(Kernel kernel)
-{
-    return kernel == Kernel::SavitzkyGolay || kernel == Kernel::Gaussian;
-}
 
 /**
  * Highest Savitzky-Golay polynomial order offered, regardless of the window size. Fitting a
@@ -60,7 +54,7 @@ constexpr int maxPolynomialOrder = 10;
 
 DerivativeTransformationPlugin::DerivativeTransformationPlugin(const PluginFactory* factory) :
     TransformationPlugin(factory),
-    _kernel(Kernel::Central),
+    _kernel(Kernel::SavitzkyGolay),
     _output(Output::Derived),
     _sgWindowSize(7),
     _sgPolynomialOrder(2),
@@ -95,7 +89,7 @@ void DerivativeTransformationPlugin::transform()
 
     task.setName("Derivative Transformation");
     task.setRunning();
-    task.setProgressDescription(QString("1st derivative, %1 (%2)").arg(kernelDescription, getOutputName(_output).toLower()));
+    task.setProgressDescription(QString("1st derivative, %1 (%2)").arg(kernelDescription, getOutputName(_output)));
 
     const auto weightTable = derivative::buildWeightTable(_kernel, numDimensions, _sgWindowSize, _sgPolynomialOrder, _sigma);
 
@@ -229,13 +223,16 @@ void DerivativeTransformationPlugin::transform()
 // -----------------------------------------------------------------------------
 
 DerivativeTransformationPluginFactory::DerivativeTransformationPluginFactory() :
+    _kernelAction(this, "Kernel", DerivativeTransformationPlugin::kernels.values(), DerivativeTransformationPlugin::getKernelName(Kernel::SavitzkyGolay)),
+    _outputAction(this, "Output", { DerivativeTransformationPlugin::getOutputName(Output::InPlace), DerivativeTransformationPlugin::getOutputName(Output::Derived) }, DerivativeTransformationPlugin::getOutputName(Output::Derived)),
     _sgWindowSizeAction(this, "Window size", 3, 101, 7),
     _sgPolynomialOrderAction(this, "Polynomial order", 1, 10, 2),
     _sigmaAction(this, "Sigma", 0.1f, 25.0f, 1.0f, 2),
-    _sgGroupAction(this, "Savitzky-Golay"),
-    _gaussianGroupAction(this, "Gaussian derivative"),
+    _groupAction(this, "Derivative"),
     _sgWindowSizeLast(_sgWindowSizeAction.getValue())
 {
+    _kernelAction.setToolTip("Derivative kernel every spectrum is convolved with");
+    _outputAction.setToolTip("Whether the derivative overwrites the input dataset or is written to a derived one");
     _sgWindowSizeAction.setToolTip("Sliding window size in samples (odd; stepping moves it by two)");
     _sgPolynomialOrderAction.setToolTip("Order of the fitted polynomial (kept below the window size)");
     _sigmaAction.setToolTip("Standard deviation of the Gaussian in samples");
@@ -247,19 +244,23 @@ DerivativeTransformationPluginFactory::DerivativeTransformationPluginFactory() :
         constrainSavitzkyGolayParameters();
     });
 
+    connect(&_kernelAction, &mv::gui::OptionAction::currentTextChanged, this, [this]() -> void {
+        constrainParametersToKernel();
+    });
+
     constrainSavitzkyGolayParameters();
+    constrainParametersToKernel();
 
-    // The parameters live on the factory rather than on each trigger action, so that whichever
+    // The settings live on the factory rather than on the trigger action, so that whichever
     // way they are reached — the gear button of a trigger picker or the modal prompt of the
-    // right-click entries — both routes read and write the same values
-    _sgGroupAction.setToolTip("Savitzky-Golay derivative settings");
-    _sgGroupAction.setLabelSizingType(mv::gui::GroupAction::LabelSizingType::Auto);
-    _sgGroupAction.addAction(&_sgWindowSizeAction);
-    _sgGroupAction.addAction(&_sgPolynomialOrderAction);
-
-    _gaussianGroupAction.setToolTip("Derivative-of-Gaussian settings");
-    _gaussianGroupAction.setLabelSizingType(mv::gui::GroupAction::LabelSizingType::Auto);
-    _gaussianGroupAction.addAction(&_sigmaAction);
+    // right-click entry — both routes read and write the same values
+    _groupAction.setToolTip("Derivative settings");
+    _groupAction.setLabelSizingType(mv::gui::GroupAction::LabelSizingType::Auto);
+    _groupAction.addAction(&_kernelAction);
+    _groupAction.addAction(&_outputAction);
+    _groupAction.addAction(&_sgWindowSizeAction);
+    _groupAction.addAction(&_sgPolynomialOrderAction);
+    _groupAction.addAction(&_sigmaAction);
 
     getPluginMetadata().setDescription("First derivative of spectral response functions");
     getPluginMetadata().setSummary("Computes the first derivative of per-point spectra via selectable derivative kernels (finite differences, Savitzky-Golay, Gaussian).");
@@ -273,23 +274,28 @@ DerivativeTransformationPlugin* DerivativeTransformationPluginFactory::produce()
     return new DerivativeTransformationPlugin(this);
 }
 
-mv::gui::WidgetAction* DerivativeTransformationPluginFactory::getConfigurationAction(const Kernel& kernel)
+mv::gui::WidgetAction* DerivativeTransformationPluginFactory::getConfigurationAction()
 {
-    switch (kernel)
-    {
-        case Kernel::SavitzkyGolay:
-            return &_sgGroupAction;
+    return &_groupAction;
+}
 
-        case Kernel::Gaussian:
-            return &_gaussianGroupAction;
+Kernel DerivativeTransformationPluginFactory::getKernel() const
+{
+    return DerivativeTransformationPlugin::kernels.key(_kernelAction.getCurrentText(), Kernel::SavitzkyGolay);
+}
 
-        case Kernel::Forward:
-        case Kernel::Central:
-        case Kernel::Central5:
-            break;
-    }
+void DerivativeTransformationPluginFactory::constrainParametersToKernel()
+{
+    const auto kernel = getKernel();
 
-    return nullptr;
+    _sgWindowSizeAction.setForceDisabled(kernel != Kernel::SavitzkyGolay);
+    _sgPolynomialOrderAction.setForceDisabled(kernel != Kernel::SavitzkyGolay);
+    _sigmaAction.setForceDisabled(kernel != Kernel::Gaussian);
+}
+
+DerivativeTransformationPlugin::Output DerivativeTransformationPluginFactory::getOutput() const
+{
+    return DerivativeTransformationPlugin::outputs.key(_outputAction.getCurrentText(), Output::Derived);
 }
 
 void DerivativeTransformationPluginFactory::constrainSavitzkyGolayParameters()
@@ -329,26 +335,23 @@ float DerivativeTransformationPluginFactory::getGaussianSigma() const
     return _sigmaAction.getValue();
 }
 
-bool DerivativeTransformationPluginFactory::editKernelParameters(const Kernel& kernel)
+bool DerivativeTransformationPluginFactory::editSettings()
 {
-    auto configurationAction = getConfigurationAction(kernel);
-
-    if (!configurationAction)
-        return true;
-
     // The very actions the configuration action offers are edited here, so cancelling has to
     // put back what they held before the dialog was opened
+    const auto kernel           = _kernelAction.getCurrentText();
+    const auto output           = _outputAction.getCurrentText();
     const auto windowSize       = _sgWindowSizeAction.getValue();
     const auto polynomialOrder  = _sgPolynomialOrderAction.getValue();
     const auto sigma            = _sigmaAction.getValue();
 
     QDialog dialog;
 
-    dialog.setWindowTitle(QString("Derivative Transformation: %1").arg(DerivativeTransformationPlugin::getKernelName(kernel)));
+    dialog.setWindowTitle("Derivative Transformation");
 
     auto layout = new QVBoxLayout(&dialog);
 
-    layout->addWidget(configurationAction->createWidget(&dialog));
+    layout->addWidget(getConfigurationAction()->createWidget(&dialog));
 
     auto buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
 
@@ -360,6 +363,8 @@ bool DerivativeTransformationPluginFactory::editKernelParameters(const Kernel& k
     if (dialog.exec() == QDialog::Accepted)
         return true;
 
+    _kernelAction.setCurrentText(kernel);
+    _outputAction.setCurrentText(output);
     _sgWindowSizeAction.setValue(windowSize);
     _sgPolynomialOrderAction.setValue(polynomialOrder);
     _sigmaAction.setValue(sigma);
@@ -376,61 +381,45 @@ mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::createTrigg
 {
     mv::gui::PluginTriggerActions pluginTriggerActions;
 
-    const auto addTriggerAction = [this, &pluginTriggerActions, datasets, configurable](const Output& output, const Kernel& kernel) {
-        const auto kernelName = DerivativeTransformationPlugin::getKernelName(kernel);
-        const auto outputName = DerivativeTransformationPlugin::getOutputName(output);
+    auto factory = const_cast<DerivativeTransformationPluginFactory*>(this);
 
-        // The ellipsis promises a dialog, so it is only earned where one is actually shown
-        const auto menuName = !configurable && isParameterizedKernel(kernel) ? kernelName + "..." : kernelName;
+    // Where the settings are not shown alongside the entry they are asked for in a dialog,
+    // which the ellipsis promises
+    const auto menuName = configurable ? QString("Derivative Transformation") : QString("Derivative Transformation...");
 
-        const auto tooltip = output == Output::InPlace
-            ? QString("Compute the first derivative (%1), overwriting the input dataset").arg(kernelName)
-            : QString("Compute the first derivative (%1) into a derived dataset").arg(kernelName);
+    auto pluginTriggerAction = new mv::gui::PluginTriggerAction(factory, this,
+        menuName, "Compute the first derivative of each point's spectrum", icon(),
+        [this, factory, datasets, configurable](mv::gui::PluginTriggerAction& pluginTriggerAction) -> void {
+            // Where the caller offers no way of showing the configuration action, the
+            // settings have to be asked for here; it edits the same actions either way
+            if (!configurable && !factory->editSettings())
+                return;
 
-        auto factory = const_cast<DerivativeTransformationPluginFactory*>(this);
+            // An action built from data types alone is bound to its datasets by whoever
+            // triggers it, which may be long after the action itself was created
+            const auto targets = datasets.isEmpty() ? pluginTriggerAction.getDatasets() : datasets;
 
-        auto pluginTriggerAction = new mv::gui::PluginTriggerAction(factory, this,
-            QString("Derivative Transformation/%1/%2").arg(outputName, menuName), tooltip, icon(),
-            [this, factory, datasets, kernel, output, configurable](mv::gui::PluginTriggerAction& pluginTriggerAction) -> void {
-                // Where the caller offers no way of showing the configuration action, the
-                // parameters have to be asked for here; it edits the same actions either way
-                if (!configurable && !factory->editKernelParameters(kernel))
-                    return;
+            int sgWindowSize        = 0;
+            int sgPolynomialOrder   = 0;
 
-                // An action built from data types alone is bound to its datasets by whoever
-                // triggers it, which may be long after the action itself was created
-                const auto targets = datasets.isEmpty() ? pluginTriggerAction.getDatasets() : datasets;
+            getSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
 
-                int sgWindowSize        = 0;
-                int sgPolynomialOrder   = 0;
-
-                getSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
-
-                for (const auto& dataset : targets) {
-                    auto pluginInstance = dynamic_cast<DerivativeTransformationPlugin*>(plugins().requestPlugin(getKind()));
-                    if (pluginInstance) {
-                        pluginInstance->setInputDataset(dataset);
-                        pluginInstance->setKernel(kernel);
-                        pluginInstance->setOutput(output);
-                        pluginInstance->setSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
-                        pluginInstance->setGaussianSigma(getGaussianSigma());
-                        pluginInstance->transform();
-                    }
+            for (const auto& dataset : targets) {
+                auto pluginInstance = dynamic_cast<DerivativeTransformationPlugin*>(plugins().requestPlugin(getKind()));
+                if (pluginInstance) {
+                    pluginInstance->setInputDataset(dataset);
+                    pluginInstance->setKernel(getKernel());
+                    pluginInstance->setOutput(getOutput());
+                    pluginInstance->setSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
+                    pluginInstance->setGaussianSigma(getGaussianSigma());
+                    pluginInstance->transform();
                 }
-            });
+            }
+        });
 
-        pluginTriggerAction->setConfigurationAction(factory->getConfigurationAction(kernel));
+    pluginTriggerAction->setConfigurationAction(factory->getConfigurationAction());
 
-        pluginTriggerActions << pluginTriggerAction;
-    };
-
-    for (const auto output : { Output::InPlace, Output::Derived }) {
-        addTriggerAction(output, Kernel::Forward);
-        addTriggerAction(output, Kernel::Central);
-        addTriggerAction(output, Kernel::Central5);
-        addTriggerAction(output, Kernel::SavitzkyGolay);
-        addTriggerAction(output, Kernel::Gaussian);
-    }
+    pluginTriggerActions << pluginTriggerAction;
 
     return pluginTriggerActions;
 }
