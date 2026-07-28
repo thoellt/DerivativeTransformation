@@ -372,61 +372,85 @@ mv::DataTypes DerivativeTransformationPluginFactory::supportedDataTypes() const
     return { PointType };
 }
 
-mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::getPluginTriggerActions(const mv::Datasets& datasets) const
+mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::createTriggerActions(const mv::Datasets& datasets, bool configurable) const
 {
     mv::gui::PluginTriggerActions pluginTriggerActions;
 
-    if (datasets.count() >= 1 && PluginFactory::areAllDatasetsOfTheSameType(datasets, PointType)) {
-        const auto addTriggerAction = [this, &pluginTriggerActions, datasets](const Output& output, const Kernel& kernel) {
-            const auto kernelName = DerivativeTransformationPlugin::getKernelName(kernel);
-            const auto outputName = DerivativeTransformationPlugin::getOutputName(output);
-            const auto menuName = isParameterizedKernel(kernel) ? kernelName + "..." : kernelName;
+    const auto addTriggerAction = [this, &pluginTriggerActions, datasets, configurable](const Output& output, const Kernel& kernel) {
+        const auto kernelName = DerivativeTransformationPlugin::getKernelName(kernel);
+        const auto outputName = DerivativeTransformationPlugin::getOutputName(output);
 
-            const auto tooltip = output == Output::InPlace
-                ? QString("Compute the first derivative (%1), overwriting the input dataset").arg(kernelName)
-                : QString("Compute the first derivative (%1) into a derived dataset").arg(kernelName);
+        // The ellipsis promises a dialog, so it is only earned where one is actually shown
+        const auto menuName = !configurable && isParameterizedKernel(kernel) ? kernelName + "..." : kernelName;
 
-            auto factory = const_cast<DerivativeTransformationPluginFactory*>(this);
+        const auto tooltip = output == Output::InPlace
+            ? QString("Compute the first derivative (%1), overwriting the input dataset").arg(kernelName)
+            : QString("Compute the first derivative (%1) into a derived dataset").arg(kernelName);
 
-            auto pluginTriggerAction = new mv::gui::PluginTriggerAction(factory, this,
-                QString("Derivative Transformation/%1/%2").arg(outputName, menuName), tooltip, icon(),
-                [this, factory, datasets, kernel, output](mv::gui::PluginTriggerAction& pluginTriggerAction) -> void {
-                    // Nothing here shows the configuration action, so the parameters still
-                    // have to be asked for; it edits the very actions the gear button offers
-                    if (!factory->editKernelParameters(kernel))
-                        return;
+        auto factory = const_cast<DerivativeTransformationPluginFactory*>(this);
 
-                    int sgWindowSize        = 0;
-                    int sgPolynomialOrder   = 0;
+        auto pluginTriggerAction = new mv::gui::PluginTriggerAction(factory, this,
+            QString("Derivative Transformation/%1/%2").arg(outputName, menuName), tooltip, icon(),
+            [this, factory, datasets, kernel, output, configurable](mv::gui::PluginTriggerAction& pluginTriggerAction) -> void {
+                // Where the caller offers no way of showing the configuration action, the
+                // parameters have to be asked for here; it edits the same actions either way
+                if (!configurable && !factory->editKernelParameters(kernel))
+                    return;
 
-                    getSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
+                // An action built from data types alone is bound to its datasets by whoever
+                // triggers it, which may be long after the action itself was created
+                const auto targets = datasets.isEmpty() ? pluginTriggerAction.getDatasets() : datasets;
 
-                    for (const auto& dataset : datasets) {
-                        auto pluginInstance = dynamic_cast<DerivativeTransformationPlugin*>(plugins().requestPlugin(getKind()));
-                        if (pluginInstance) {
-                            pluginInstance->setInputDataset(dataset);
-                            pluginInstance->setKernel(kernel);
-                            pluginInstance->setOutput(output);
-                            pluginInstance->setSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
-                            pluginInstance->setGaussianSigma(getGaussianSigma());
-                            pluginInstance->transform();
-                        }
+                int sgWindowSize        = 0;
+                int sgPolynomialOrder   = 0;
+
+                getSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
+
+                for (const auto& dataset : targets) {
+                    auto pluginInstance = dynamic_cast<DerivativeTransformationPlugin*>(plugins().requestPlugin(getKind()));
+                    if (pluginInstance) {
+                        pluginInstance->setInputDataset(dataset);
+                        pluginInstance->setKernel(kernel);
+                        pluginInstance->setOutput(output);
+                        pluginInstance->setSavitzkyGolayParameters(sgWindowSize, sgPolynomialOrder);
+                        pluginInstance->setGaussianSigma(getGaussianSigma());
+                        pluginInstance->transform();
                     }
-                });
+                }
+            });
 
-            pluginTriggerAction->setConfigurationAction(factory->getConfigurationAction(kernel));
+        pluginTriggerAction->setConfigurationAction(factory->getConfigurationAction(kernel));
 
-            pluginTriggerActions << pluginTriggerAction;
-        };
+        pluginTriggerActions << pluginTriggerAction;
+    };
 
-        for (const auto output : { Output::InPlace, Output::Derived }) {
-            addTriggerAction(output, Kernel::Forward);
-            addTriggerAction(output, Kernel::Central);
-            addTriggerAction(output, Kernel::Central5);
-            addTriggerAction(output, Kernel::SavitzkyGolay);
-            addTriggerAction(output, Kernel::Gaussian);
-        }
+    for (const auto output : { Output::InPlace, Output::Derived }) {
+        addTriggerAction(output, Kernel::Forward);
+        addTriggerAction(output, Kernel::Central);
+        addTriggerAction(output, Kernel::Central5);
+        addTriggerAction(output, Kernel::SavitzkyGolay);
+        addTriggerAction(output, Kernel::Gaussian);
     }
 
     return pluginTriggerActions;
+}
+
+mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::getPluginTriggerActions(const mv::Datasets& datasets) const
+{
+    if (datasets.count() < 1 || !PluginFactory::areAllDatasetsOfTheSameType(datasets, PointType))
+        return {};
+
+    // Reached from the dataset right-click menu, which triggers straight away and shows
+    // nothing of the configuration action
+    return createTriggerActions(datasets, false);
+}
+
+mv::gui::PluginTriggerActions DerivativeTransformationPluginFactory::getPluginTriggerActions(const mv::DataTypes& dataTypes) const
+{
+    if (dataTypes.isEmpty() || dataTypes.count(PointType) != dataTypes.count())
+        return {};
+
+    // Asked for without any dataset in hand, so by a caller picking a transformation up front
+    // — one that can show the configuration action and assigns the datasets before triggering
+    return createTriggerActions({}, true);
 }

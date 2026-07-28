@@ -98,8 +98,19 @@ public:
 
     mv::DataTypes supportedDataTypes() const override;
 
-    /** One right-click "Transform" entry per output mode and kernel */
+    /** One right-click "Transform" entry per output mode and kernel, bound to \p datasets */
     mv::gui::PluginTriggerActions getPluginTriggerActions(const mv::Datasets& datasets) const override;
+
+    /**
+     * Get plugin trigger actions for \p dataTypes
+     *
+     * The same entries, but for a caller that has no dataset yet and assigns one to the
+     * action it picked before triggering it.
+     *
+     * @param dataTypes Vector of input data types
+     * @return Vector of plugin trigger actions
+     */
+    mv::gui::PluginTriggerActions getPluginTriggerActions(const mv::DataTypes& dataTypes) const override;
 
     /**
      * Get the action that configures the parameters of \p kernel
@@ -130,6 +141,16 @@ public:
     float getGaussianSigma() const;
 
 private:
+
+    /**
+     * Build one trigger action per output mode and kernel
+     *
+     * @param datasets Datasets to bind, empty to have each action resolve its own when triggered
+     * @param configurable Whether the caller shows the configuration action itself, in which
+     *                     case the parameters are not asked for again when triggering
+     * @return Vector of plugin trigger actions
+     */
+    mv::gui::PluginTriggerActions createTriggerActions(const mv::Datasets& datasets, bool configurable) const;
 
     /**
      * Ask for the parameters of \p kernel in a modal dialog
