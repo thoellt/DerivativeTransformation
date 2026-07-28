@@ -20,8 +20,15 @@ A single entry; everything it does is a setting.
 
 | Mode | Description |
 |---|---|
-| **Add derived dataset** (default) | The derivative is written to a **new derived dataset** named after the input and the kernel; the input is left untouched. |
+| **Add derived dataset** | The derivative is written to a **new derived dataset** named after the input and the kernel; the input is left untouched. |
 | **Replace existing dataset** | The derivative overwrites the values of the input dataset. Applied to a subset, only that subset's points are written and the dimension names are left alone, since they are shared with the parent. |
+
+Which of the two it starts on depends on where the plugin was reached from. The dataset
+right-click menu defaults to **Add derived dataset**, since the data it acts on is already
+in the hierarchy and worth keeping. A host that drives the plugin from its own UI — a loader
+applying a transformation to data it is still assembling, say — defaults to **Replace existing
+dataset**. The two keep their settings separately, so a choice made in one does not follow you
+into the other.
 
 ### Kernels
 
