@@ -4,12 +4,15 @@
 
 #include <actions/DecimalAction.h>
 #include <actions/IntegralAction.h>
+#include <actions/WidgetActionViewWidget.h>
 
 #include <QDebug>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QEventLoop>
 #include <QFutureWatcher>
+#include <QGridLayout>
+#include <QGroupBox>
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -317,6 +320,62 @@ void DerivativeTransformationPluginFactory::Settings::constrainSavitzkyGolayPara
     _sgPolynomialOrderAction.setValue(std::min(_sgPolynomialOrderAction.getValue(), highestOrder));
 }
 
+QWidget* DerivativeTransformationPluginFactory::Settings::getWidget(QWidget* parent, const std::int32_t& widgetFlags)
+{
+    auto settingsWidget = createSettingsWidget(parent);
+
+    if (!(widgetFlags & mv::gui::WidgetActionViewWidget::PopupLayout))
+        return settingsWidget;
+
+    // In a popup the layout this override replaces would have boxed the whole group under its
+    // own title, so that box has to be put back by hand here
+    auto popupWidget = new QWidget(parent);
+    auto popupLayout = new QVBoxLayout(popupWidget);
+    auto groupBox    = new QGroupBox(text(), popupWidget);
+    auto groupLayout = new QVBoxLayout(groupBox);
+
+    popupLayout->setContentsMargins(4, 4, 4, 4);
+    groupLayout->addWidget(settingsWidget);
+    popupLayout->addWidget(groupBox);
+
+    return popupWidget;
+}
+
+QWidget* DerivativeTransformationPluginFactory::Settings::createSettingsWidget(QWidget* parent)
+{
+    auto widget = new QWidget(parent);
+    auto layout = new QVBoxLayout(widget);
+
+    layout->setContentsMargins(0, 0, 0, 0);
+
+    // What is computed is a separate decision from where the result goes, so the two are boxed
+    // apart rather than laid out as one run of rows
+    const auto addGroupBox = [widget, layout](const QString& title, const QVector<mv::gui::WidgetAction*>& actions, bool showLabels) -> void {
+        auto groupBox   = new QGroupBox(title, widget);
+        auto gridLayout = new QGridLayout(groupBox);
+
+        for (auto action : actions) {
+            const auto row = gridLayout->rowCount();
+
+            if (showLabels)
+                gridLayout->addWidget(action->createLabelWidget(groupBox), row, 0);
+
+            gridLayout->addWidget(action->createWidget(groupBox), row, showLabels ? 1 : 0, 1, showLabels ? 1 : 2);
+        }
+
+        gridLayout->setColumnStretch(1, 1);
+
+        layout->addWidget(groupBox);
+    };
+
+    addGroupBox("Parameters", { &_kernelAction, &_sgWindowSizeAction, &_sgPolynomialOrderAction, &_sigmaAction }, true);
+
+    // The box already says what the drop-down is, so it carries no label of its own
+    addGroupBox("Output", { &_outputAction }, false);
+
+    return widget;
+}
+
 bool DerivativeTransformationPluginFactory::Settings::edit()
 {
     // The very actions that are shown here are the ones kept afterwards, so cancelling has to
@@ -333,7 +392,7 @@ bool DerivativeTransformationPluginFactory::Settings::edit()
 
     auto layout = new QVBoxLayout(&dialog);
 
-    layout->addWidget(createWidget(&dialog));
+    layout->addWidget(createSettingsWidget(&dialog));
 
     auto buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
 

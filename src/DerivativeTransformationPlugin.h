@@ -146,7 +146,28 @@ public:
         /** Ask for these settings in a modal dialog, restoring them when it is cancelled */
         bool edit();
 
+    protected:
+
+        /**
+         * Get widget representation of the settings
+         *
+         * Overridden so that every caller — the gear button of a plugin trigger picker as
+         * much as the modal dialog — gets the same boxed layout rather than the flat run of
+         * rows a group action lays out by default.
+         *
+         * @param parent Pointer to parent widget
+         * @param widgetFlags Widget flags, unused: the layout is the same either way
+         */
+        QWidget* getWidget(QWidget* parent, const std::int32_t& widgetFlags) override;
+
     private:
+
+        /**
+         * Build the settings widget: what is computed, then where it goes
+         * @param parent Pointer to parent widget
+         * @return Pointer to the created widget
+         */
+        QWidget* createSettingsWidget(QWidget* parent);
 
         /**
          * Grey out the parameters that do not belong to the selected kernel
